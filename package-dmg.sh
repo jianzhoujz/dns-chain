@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="${APP_NAME:-DNSChain}"
-APP_VERSION="${APP_VERSION:-${VERSION:-0.1.0}}"
+APP_VERSION="${APP_VERSION:-${VERSION:-0.1.1}}"
 APP_PATH="$ROOT/build/$APP_NAME.app"
 DIST_DIR="$ROOT/dist"
 WORK_DIR="$ROOT/build/dmg"

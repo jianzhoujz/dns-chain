@@ -162,21 +162,21 @@ dist/DNSChain-<version>.dmg
 3. 打包：
 
    ```bash
-   rtk env APP_VERSION=0.1.0 APP_BUILD=0.1.0 UNIVERSAL=1 ./package-dmg.sh
+   rtk env APP_VERSION=<version> APP_BUILD=<version> UNIVERSAL=1 ./package-dmg.sh
    ```
 
 4. GitHub Release：
 
    ```bash
-   rtk git tag v0.1.0
+   rtk git tag v<version>
    rtk git push origin main --tags
-   rtk gh release create v0.1.0 dist/DNSChain-0.1.0.dmg --repo jianzhoujz/dns-chain
+   rtk gh release create v<version> dist/DNSChain-<version>.dmg --repo jianzhoujz/dns-chain
    ```
 
 5. 更新 Homebrew tap 的 `Casks/dns-chain.rb`，sha256 来自：
 
    ```bash
-   rtk shasum -a 256 dist/DNSChain-0.1.0.dmg
+   rtk shasum -a 256 dist/DNSChain-<version>.dmg
    ```
 
 ## 不要做的事

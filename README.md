@@ -185,7 +185,7 @@ open "build/DNSChain.app"
 发布构建可指定版本：
 
 ```bash
-APP_VERSION=0.1.0 APP_BUILD=0.1.0 ./package-dmg.sh
+APP_VERSION=0.1.1 APP_BUILD=0.1.1 ./package-dmg.sh
 ```
 
 ## 系统要求
