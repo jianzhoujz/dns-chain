@@ -38,7 +38,7 @@ public final class LoginItemManager: @unchecked Sendable {
         try fileManager.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         let plist: [String: Any] = [
             "Label": label,
-            "ProgramArguments": [executableURL.path],
+            "ProgramArguments": [executableURL.path, "--background"],
             "RunAtLoad": true,
             "KeepAlive": false,
             "StandardOutPath": "/tmp/dns-chain.launchd.out.log",

@@ -89,7 +89,7 @@ func drawIcon(pixels: Int) -> NSBitmapImageRep {
         .font: font,
         .paragraphStyle: paragraph
     ]
-    let text = NSAttributedString(string: "🐝", attributes: attributes)
+    let text = NSAttributedString(string: "🐙", attributes: attributes)
     let textRect = NSRect(
         x: tileRect.minX,
         y: tileRect.midY - fontSize * 0.52,

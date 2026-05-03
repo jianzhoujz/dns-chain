@@ -24,6 +24,21 @@ public struct ServerConfig: Codable, Equatable, Sendable {
     }
 }
 
+public struct ProxyConfig: Codable, Equatable, Sendable {
+    public var listenHost: String
+    public var listenPort: Int
+
+    public init(listenHost: String = "127.0.0.1", listenPort: Int = 8080) {
+        self.listenHost = listenHost
+        self.listenPort = listenPort
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case listenHost = "listen_host"
+        case listenPort = "listen_port"
+    }
+}
+
 public struct DNSUpstreamConfig: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var name: String
@@ -165,6 +180,7 @@ public struct LoggingConfig: Codable, Equatable, Sendable {
 
 public struct DNSChainConfig: Codable, Equatable, Sendable {
     public var server: ServerConfig
+    public var proxy: ProxyConfig
     public var dnsChain: [DNSUpstreamConfig]
     public var fallbackWhen: FallbackConfig
     public var blockedAnswers: BlockedAnswersConfig
@@ -175,6 +191,7 @@ public struct DNSChainConfig: Codable, Equatable, Sendable {
 
     public init(
         server: ServerConfig = ServerConfig(),
+        proxy: ProxyConfig = ProxyConfig(),
         dnsChain: [DNSUpstreamConfig] = PresetLibrary.defaultChain,
         fallbackWhen: FallbackConfig = FallbackConfig(),
         blockedAnswers: BlockedAnswersConfig = BlockedAnswersConfig(),
@@ -184,6 +201,7 @@ public struct DNSChainConfig: Codable, Equatable, Sendable {
         launchAtLogin: Bool = false
     ) {
         self.server = server
+        self.proxy = proxy
         self.dnsChain = dnsChain
         self.fallbackWhen = fallbackWhen
         self.blockedAnswers = blockedAnswers
@@ -195,6 +213,7 @@ public struct DNSChainConfig: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case server
+        case proxy
         case dnsChain = "dns_chain"
         case fallbackWhen = "fallback_when"
         case blockedAnswers = "blocked_answers"
@@ -207,6 +226,7 @@ public struct DNSChainConfig: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.server = try container.decodeIfPresent(ServerConfig.self, forKey: .server) ?? ServerConfig()
+        self.proxy = try container.decodeIfPresent(ProxyConfig.self, forKey: .proxy) ?? ProxyConfig()
         self.dnsChain = try container.decodeIfPresent([DNSUpstreamConfig].self, forKey: .dnsChain) ?? PresetLibrary.defaultChain
         self.fallbackWhen = try container.decodeIfPresent(FallbackConfig.self, forKey: .fallbackWhen) ?? FallbackConfig()
         self.blockedAnswers = try container.decodeIfPresent(BlockedAnswersConfig.self, forKey: .blockedAnswers) ?? BlockedAnswersConfig()

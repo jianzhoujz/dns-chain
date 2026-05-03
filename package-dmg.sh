@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="${APP_NAME:-DNS Chain}"
+APP_NAME="${APP_NAME:-DNSChain}"
 APP_VERSION="${APP_VERSION:-${VERSION:-0.1.0}}"
 APP_PATH="$ROOT/build/$APP_NAME.app"
 DIST_DIR="$ROOT/dist"
@@ -10,15 +10,21 @@ WORK_DIR="$ROOT/build/dmg"
 STAGE_DIR="$WORK_DIR/stage"
 RW_DMG="$WORK_DIR/DNSChain-rw.dmg"
 FINAL_DMG="$DIST_DIR/DNSChain-$APP_VERSION.dmg"
-VOLUME_NAME="DNS Chain"
+VOLUME_NAME="DNSChain"
+MOUNT_DIR="/Volumes/$VOLUME_NAME"
+DMG_ASSET_DIR="${DMG_ASSET_DIR:-/Users/zhou/Projects/demo/input-indicator/packaging/dmg}"
 
 "$ROOT/build.sh" >/dev/null
 
 rm -rf "$WORK_DIR"
-mkdir -p "$STAGE_DIR" "$DIST_DIR"
+mkdir -p "$STAGE_DIR/.background" "$DIST_DIR"
 
 cp -R "$APP_PATH" "$STAGE_DIR/"
 ln -s /Applications "$STAGE_DIR/Applications"
+cp "$DMG_ASSET_DIR/background.tiff" "$STAGE_DIR/.background.tiff"
+cp "$DMG_ASSET_DIR/background.tiff" "$STAGE_DIR/.background/background.tiff"
+cp "$DMG_ASSET_DIR/VolumeIcon.icns" "$STAGE_DIR/.VolumeIcon.icns"
+cp "$DMG_ASSET_DIR/DS_Store" "$STAGE_DIR/.DS_Store"
 
 hdiutil create \
   -volname "$VOLUME_NAME" \
@@ -27,6 +33,50 @@ hdiutil create \
   -ov \
   -format UDRW \
   "$RW_DMG" >/dev/null
+
+cleanup() {
+  hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true
+  rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true
+rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+
+hdiutil attach "$RW_DMG" \
+  -readwrite \
+  -noverify \
+  -noautoopen \
+  -mountpoint "$MOUNT_DIR" >/dev/null
+
+SetFile -a C "$MOUNT_DIR" >/dev/null 2>&1 || true
+
+osascript <<APPLESCRIPT
+tell application "Finder"
+  tell disk "$VOLUME_NAME"
+  open
+  delay 1
+  set current view of container window to icon view
+  set toolbar visible of container window to false
+  set statusbar visible of container window to false
+  set bounds of container window to {100, 400, 580, 752}
+  set theViewOptions to icon view options of container window
+  set arrangement of theViewOptions to not arranged
+  set background picture of theViewOptions to (POSIX file "$MOUNT_DIR/.background/background.tiff" as alias)
+  set icon size of theViewOptions to 80
+  set text size of theViewOptions to 12
+  set position of item "$APP_NAME.app" of container window to {120, 160}
+  set position of item "Applications" of container window to {360, 160}
+  update without registering applications
+  delay 1
+  close
+  end tell
+end tell
+APPLESCRIPT
+
+sync
+hdiutil detach "$MOUNT_DIR" >/dev/null
+trap - EXIT
 
 rm -f "$FINAL_DMG"
 hdiutil convert "$RW_DMG" \

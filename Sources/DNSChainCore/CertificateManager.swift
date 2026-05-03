@@ -18,7 +18,17 @@ public struct CertificatePaths: Sendable {
 
     public static func `default`() -> CertificatePaths {
         let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/DNSChain/certs", isDirectory: true)
+        return make(directory: directory)
+    }
+
+    public static func legacyDefault() -> CertificatePaths {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/DNS Chain/certs", isDirectory: true)
+        return make(directory: directory)
+    }
+
+    private static func make(directory: URL) -> CertificatePaths {
         return CertificatePaths(
             directory: directory,
             rootCertificate: directory.appendingPathComponent("root-ca.pem"),
@@ -34,6 +44,19 @@ public final class CertificateManager: @unchecked Sendable {
 
     public init(paths: CertificatePaths = .default()) {
         self.paths = paths
+        try? Self.migrateLegacyCertificates(to: paths)
+    }
+
+    private static func migrateLegacyCertificates(to paths: CertificatePaths) throws {
+        let legacy = CertificatePaths.legacyDefault()
+        let fm = FileManager.default
+        guard legacy.directory.path != paths.directory.path,
+              fm.fileExists(atPath: legacy.directory.path),
+              !fm.fileExists(atPath: paths.directory.path) else {
+            return
+        }
+        try fm.createDirectory(at: paths.directory.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.copyItem(at: legacy.directory, to: paths.directory)
     }
 
     public func state() -> CertificateState {

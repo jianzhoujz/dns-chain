@@ -1,16 +1,24 @@
-# AGENTS.md — DNS Chain 项目指南
+# AGENTS.md — DNSChain 项目指南
 
 本文件是 AI 协作 Agent 的项目入口。开始改代码前先读本文，再读源码。
 
 ## 项目定位
 
-DNS Chain 是一个 macOS 菜单栏应用，在本机启动 HTTPS DNS-over-HTTPS 服务：
+DNSChain 是一个 macOS 菜单栏应用，在本机启动 HTTPS DNS-over-HTTPS 服务：
 
 ```text
 https://localhost:8053/dns-query
 ```
 
-Chrome 或其它客户端把 Secure DNS 指向该地址后，应用按配置的 DNS Chain 依次查询 system DNS、DoH upstream、plain DNS upstream，并根据 fallback 条件决定是否继续尝试下一个上游。
+Chrome 或其它客户端把 Secure DNS 指向该地址后，应用按配置的 DNSChain 依次查询 system DNS、DoH upstream、plain DNS upstream，并根据 fallback 条件决定是否继续尝试下一个上游。
+
+应用还提供一个本地 HTTP/HTTPS 代理入口，默认监听：
+
+```text
+127.0.0.1:8080
+```
+
+代理负责接收本地 HTTP 代理请求并原样转发；HTTPS 使用 `CONNECT` 隧道。UI 可写入/关闭 macOS 系统代理，并展示代理请求列表。
 
 核心约束：
 
@@ -30,6 +38,7 @@ dns-chain/
 │   │   └── DNSChainApp.swift
 │   └── DNSChainCore/
 │       ├── LocalDoHServer.swift
+│       ├── LocalHTTPProxyServer.swift
 │       ├── ChainResolver.swift
 │       ├── DNSMessage.swift
 │       ├── Config.swift
@@ -56,7 +65,8 @@ dns-chain/
 | --- | --- |
 | `Sources/DNSChain/DNSChainApp.swift` | SwiftUI/AppKit 菜单栏、设置窗口、状态管理、更新检查 |
 | `Sources/DNSChainCore/LocalDoHServer.swift` | SwiftNIO HTTPS DoH server；只处理 NIO 解析后的 HTTP request parts |
-| `Sources/DNSChainCore/ChainResolver.swift` | DNS Chain、fallback、cache、query log |
+| `Sources/DNSChainCore/LocalHTTPProxyServer.swift` | 本地 HTTP/HTTPS 代理；HTTP 转发和 HTTPS CONNECT 隧道 |
+| `Sources/DNSChainCore/ChainResolver.swift` | DNSChain、fallback、cache、query log |
 | `Sources/DNSChainCore/DNSMessage.swift` | 最小 DNS wire parser/response helper |
 | `Sources/DNSChainCore/Config.swift` | JSON 配置模型和默认配置 |
 | `Sources/DNSChainCore/ConfigStore.swift` | `~/.config/dns-chain/config.json` 读写和旧路径迁移 |
@@ -102,14 +112,16 @@ dns-chain/
 证书路径：
 
 ```text
-~/Library/Application Support/DNS Chain/certs/
+~/Library/Application Support/DNSChain/certs/
 ```
 
 ## UI 约定
 
-- 状态栏使用 `NSStatusItem(withLength: 22)`，菜单栏标题当前是 `🐝`。
+- 状态栏使用 `NSStatusItem(withLength: 22)`，菜单栏图标当前是 `🐙`；DoH 服务停止时图标使用低透明度灰色状态。
 - 设置窗口由 `SettingsWindowPresenter` 创建 AppKit `NSWindow`，内容是 SwiftUI。
+- 设置窗口 tab 为 `DNS Chain`、`代理`、`日志`。`DNS Chain` 页左侧放本地 DoH、证书、回落、配置文件和应用信息，右侧放 DNSChain 上游列表。
 - 查询日志需要展示 qtype、result、final upstream、RCODE、attempts 和 answers。
+- 代理日志需要展示 method、target、status、bytes up/down。
 - 配置文件在 UI 中只读展示；编辑交给系统编辑器。
 
 ## 构建与测试
@@ -132,9 +144,11 @@ rtk swift run DNSChain
 构建脚本输出：
 
 ```text
-build/DNS Chain.app
+build/DNSChain.app
 dist/DNSChain-<version>.dmg
 ```
+
+打包后的 bundle 名是 `DNSChain.app`；内部 `CFBundleExecutable` 当前故意使用 `Google Chrome`，不要在没确认网络环境影响前改回 `DNSChain`。
 
 ## 发布流程
 
@@ -148,7 +162,7 @@ dist/DNSChain-<version>.dmg
 3. 打包：
 
    ```bash
-   rtk APP_VERSION=0.1.0 APP_BUILD=0.1.0 ./package-dmg.sh
+   rtk env APP_VERSION=0.1.0 APP_BUILD=0.1.0 UNIVERSAL=1 ./package-dmg.sh
    ```
 
 4. GitHub Release：
@@ -172,3 +186,4 @@ dist/DNSChain-<version>.dmg
 - 不要恢复 Go helper、Admin API、跨进程 token 或 helper 生命周期管理。
 - 不要把证书安装改成默认写 System Keychain。
 - 不要把日志压缩成最终结果，attempt 级日志是核心排障能力。
+- 不要用 `pkill -x "Google Chrome"` 停止本应用；停止脚本必须按 DNSChain bundle 路径匹配，避免误杀真正的 Chrome。

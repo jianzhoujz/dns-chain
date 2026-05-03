@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreImage
 import DNSChainCore
 
 private func dnsQTypeLabel(_ qtype: UInt16) -> String {
@@ -16,6 +17,26 @@ private func dnsQTypeLabel(_ qtype: UInt16) -> String {
 private let gitHubRepository = "jianzhoujz/dns-chain"
 private let gitHubURL = URL(string: "https://github.com/\(gitHubRepository)")!
 private let latestReleaseURL = URL(string: "https://github.com/\(gitHubRepository)/releases/latest")!
+
+private enum LaunchOptions {
+    static let opensSettingsWindow = !CommandLine.arguments.contains("--background")
+}
+
+private func menuBarOctopusImage(isRunning: Bool) -> NSImage {
+    let size = NSSize(width: 18, height: 18)
+    let image = NSImage(size: size)
+    image.lockFocus()
+    defer { image.unlockFocus() }
+
+    if !isRunning {
+        NSGraphicsContext.current?.cgContext.setAlpha(0.32)
+    }
+    let font = NSFont(name: "Apple Color Emoji", size: 15) ?? NSFont.systemFont(ofSize: 15)
+    let text = NSAttributedString(string: "🐙", attributes: [.font: font])
+    let textSize = text.size()
+    text.draw(at: NSPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2 + 1))
+    return image
+}
 
 private struct GitHubRelease {
     let tagName: String
@@ -49,23 +70,14 @@ private struct VersionNumber: Comparable {
 }
 
 @main
-struct DNSChainApplication: App {
-    @StateObject private var model = DNSChainAppModel.shared
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    init() {
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
-
-    var body: some Scene {
-        Window("DNS Chain 设置", id: "settings") {
-            SettingsRootView()
-                .environmentObject(model)
-                .frame(minWidth: 920, minHeight: 640)
-        }
-        .commands {
-            CommandGroup(replacing: .appInfo) {}
-        }
+enum DNSChainApplication {
+    @MainActor
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
     }
 }
 
@@ -76,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
-        installStatusItem(model: DNSChainAppModel.shared)
+        let model = DNSChainAppModel.shared
+        installStatusItem(model: model)
         observer = NotificationCenter.default.addObserver(
             forName: .dnsChainRunningChanged,
             object: nil,
@@ -86,6 +99,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusItemController?.updateIcon(isRunning: DNSChainAppModel.shared.isRunning)
             }
         }
+        if LaunchOptions.opensSettingsWindow {
+            DispatchQueue.main.async {
+                SettingsWindowPresenter.shared.show(model: model)
+            }
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        SettingsWindowPresenter.shared.show(model: DNSChainAppModel.shared)
+        return true
     }
 
     func installStatusItem(model: DNSChainAppModel) {
@@ -97,27 +124,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @MainActor
-final class StatusItemController: NSObject, NSPopoverDelegate {
+final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
-    private let popover: NSPopover
     private weak var model: DNSChainAppModel?
 
     init(model: DNSChainAppModel) {
         self.model = model
         self.statusItem = NSStatusBar.system.statusItem(withLength: 22)
-        self.popover = NSPopover()
         super.init()
-
-        let root = MenuBarView()
-            .environmentObject(model)
-            .frame(width: 360)
-        popover.contentViewController = NSHostingController(rootView: root)
-        popover.behavior = .transient
-        popover.delegate = self
 
         if let button = statusItem.button {
             button.target = self
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(openSettings(_:))
             button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
             button.alignment = .center
         }
@@ -126,19 +144,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     func updateIcon(isRunning: Bool) {
         guard let button = statusItem.button else { return }
-        button.image = nil
-        button.title = "🐝"
-        button.imagePosition = .noImage
-        button.toolTip = isRunning ? "DNS Chain 运行中" : "DNS Chain 已停止"
+        button.title = ""
+        button.image = menuBarOctopusImage(isRunning: isRunning)
+        button.imagePosition = .imageOnly
+        button.toolTip = isRunning ? "DNSChain 运行中" : "DNSChain 已停止"
     }
 
-    @objc private func togglePopover(_ sender: NSStatusBarButton) {
-        if popover.isShown {
-            popover.performClose(sender)
-        } else {
-            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-        }
+    @objc private func openSettings(_ sender: NSStatusBarButton) {
+        guard let model else { return }
+        SettingsWindowPresenter.shared.show(model: model)
     }
 }
 
@@ -154,6 +168,9 @@ final class DNSChainAppModel: ObservableObject {
     @Published var configText = ""
     @Published var launchAtLoginEnabled = false
     @Published var updateCheckInProgress = false
+    @Published var isProxyRunning = false
+    @Published var proxyLogs: [ProxyRequestLog] = []
+    @Published var proxyStatusMessage = "代理未启动"
 
     private let store = ConfigStore()
     private let certificateManager = CertificateManager()
@@ -161,6 +178,9 @@ final class DNSChainAppModel: ObservableObject {
     private var resolver: ChainResolver?
     private var server: LocalDoHServer?
     private var logRefreshTask: Task<Void, Never>?
+    private let proxyLogStore = ProxyRequestLogStore(maxEntries: 1000)
+    private var proxyServer: LocalHTTPProxyServer?
+    private var proxyRefreshTask: Task<Void, Never>?
 
     init() {
         do {
@@ -184,6 +204,10 @@ final class DNSChainAppModel: ObservableObject {
 
     var chromeURL: String {
         "https://localhost:\(config.server.listenPort)\(config.server.dohPath)"
+    }
+
+    var proxyURL: String {
+        "\(config.proxy.listenHost):\(config.proxy.listenPort)"
     }
 
     var configURL: URL {
@@ -230,6 +254,47 @@ final class DNSChainAppModel: ObservableObject {
         statusMessage = "已停止"
         NotificationCenter.default.post(name: .dnsChainRunningChanged, object: nil)
         logRefreshTask?.cancel()
+    }
+
+    func startProxy() {
+        guard !isProxyRunning else { return }
+        do {
+            let server = LocalHTTPProxyServer(config: config.proxy, logs: proxyLogStore)
+            try server.start()
+            proxyServer = server
+            isProxyRunning = true
+            proxyStatusMessage = "代理运行中"
+            startProxyLogRefresh()
+        } catch {
+            isProxyRunning = false
+            proxyStatusMessage = "代理启动失败：\(String(describing: error))"
+        }
+    }
+
+    func stopProxy() {
+        proxyServer?.stop()
+        proxyServer = nil
+        isProxyRunning = false
+        proxyStatusMessage = "代理已停止"
+        proxyRefreshTask?.cancel()
+    }
+
+    func applySystemProxy() {
+        do {
+            try setSystemProxy(enabled: true)
+            proxyStatusMessage = "已写入系统代理"
+        } catch {
+            proxyStatusMessage = "写入系统代理失败：\(error.localizedDescription)"
+        }
+    }
+
+    func clearSystemProxy() {
+        do {
+            try setSystemProxy(enabled: false)
+            proxyStatusMessage = "已关闭系统代理"
+        } catch {
+            proxyStatusMessage = "关闭系统代理失败：\(error.localizedDescription)"
+        }
     }
 
     func saveConfig() {
@@ -444,7 +509,7 @@ final class DNSChainAppModel: ObservableObject {
             showUpdateAvailable(release)
         } else {
             statusMessage = "已是最新版本"
-            showMessage(title: "已是最新版本", message: "DNS Chain 当前版本为 \(appVersion)。")
+            showMessage(title: "已是最新版本", message: "DNSChain 当前版本为 \(appVersion)。")
         }
     }
 
@@ -465,7 +530,7 @@ final class DNSChainAppModel: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "发现新版本 \(release.tagName)"
-        alert.informativeText = "DNS Chain 当前版本为 \(appVersion)。是否打开 GitHub Releases 下载更新？"
+        alert.informativeText = "DNSChain 当前版本为 \(appVersion)。是否打开 GitHub Releases 下载更新？"
         alert.addButton(withTitle: "打开下载页")
         alert.addButton(withTitle: "稍后")
 
@@ -499,76 +564,70 @@ final class DNSChainAppModel: ObservableObject {
             }
         }
     }
+
+    private func startProxyLogRefresh() {
+        proxyRefreshTask?.cancel()
+        proxyRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let entries = await self.proxyLogStore.recent(limit: 200)
+                await MainActor.run {
+                    self.proxyLogs = entries
+                }
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            }
+        }
+    }
+
+    private func setSystemProxy(enabled: Bool) throws {
+        let services = try networkServices()
+        guard !services.isEmpty else {
+            throw NSError(domain: "DNSChainProxy", code: 1, userInfo: [NSLocalizedDescriptionKey: "没有找到可配置的网络服务"])
+        }
+
+        for service in services {
+            if enabled {
+                try runNetworksetup(["-setwebproxy", service, config.proxy.listenHost, String(config.proxy.listenPort)])
+                try runNetworksetup(["-setsecurewebproxy", service, config.proxy.listenHost, String(config.proxy.listenPort)])
+                try runNetworksetup(["-setwebproxystate", service, "on"])
+                try runNetworksetup(["-setsecurewebproxystate", service, "on"])
+            } else {
+                try runNetworksetup(["-setwebproxystate", service, "off"])
+                try runNetworksetup(["-setsecurewebproxystate", service, "off"])
+            }
+        }
+    }
+
+    private func networkServices() throws -> [String] {
+        let output = try runNetworksetup(["-listallnetworkservices"])
+        return output
+            .split(separator: "\n")
+            .dropFirst()
+            .map(String.init)
+            .filter { !$0.hasPrefix("*") && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    @discardableResult
+    private func runNetworksetup(_ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "DNSChainProxy", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output.trimmingCharacters(in: .whitespacesAndNewlines)])
+        }
+        return output
+    }
 }
 
 extension Notification.Name {
     static let dnsChainRunningChanged = Notification.Name("DNSChainRunningChanged")
-}
-
-struct MenuBarView: View {
-    @EnvironmentObject var model: DNSChainAppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("DNS Chain")
-                        .font(.system(size: 17, weight: .semibold))
-                    Text(model.isRunning ? "本地 DoH 正在运行" : "本地 DoH 已停止")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                StatusBadge(text: model.isRunning ? "运行中" : "停止", isActive: model.isRunning)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Chrome Secure DNS")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(model.chromeURL)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("版本 \(model.appVersion)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                Text("构建 \(model.appBuildTime)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-            }
-
-            Divider()
-
-            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-                GridRow {
-                    Button("设置", systemImage: "gearshape") { SettingsWindowPresenter.shared.show(model: model) }
-                    Button(model.updateCheckInProgress ? "检查中" : "检查更新", systemImage: "arrow.down.circle") {
-                        model.checkForUpdates()
-                    }
-                    .disabled(model.updateCheckInProgress)
-                }
-                GridRow {
-                    Button("GitHub", systemImage: "link") {
-                        model.openGitHub()
-                    }
-                    Button(model.isRunning ? "暂停服务" : "启动服务", systemImage: model.isRunning ? "pause.fill" : "play.fill") {
-                        model.isRunning ? model.stopService() : model.startService()
-                    }
-                }
-                GridRow {
-                    Button("退出", systemImage: "power") { NSApplication.shared.terminate(nil) }
-                }
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding(16)
-    }
 }
 
 struct StatusBadge: View {
@@ -609,7 +668,7 @@ final class SettingsWindowPresenter: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "DNS Chain 设置"
+        window.title = "DNSChain 设置"
         window.contentView = NSHostingView(rootView: content)
         window.center()
         window.delegate = self
@@ -621,6 +680,11 @@ final class SettingsWindowPresenter: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             window.level = .normal
         }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
     }
 
     nonisolated func windowWillClose(_ notification: Notification) {
@@ -636,11 +700,9 @@ struct SettingsRootView: View {
     var body: some View {
         TabView {
             StatusSettingsView()
-                .tabItem { Label("状态", systemImage: "gauge.with.dots.needle.50percent") }
-            ChainSettingsView()
                 .tabItem { Label("DNS Chain", systemImage: "list.number") }
-            FallbackSettingsView()
-                .tabItem { Label("回落", systemImage: "arrow.triangle.branch") }
+            ProxySettingsView()
+                .tabItem { Label("代理", systemImage: "arrow.left.arrow.right") }
             LogSettingsView()
                 .tabItem { Label("日志", systemImage: "doc.text.magnifyingglass") }
         }
@@ -654,11 +716,12 @@ struct SettingsPage<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: 21, weight: .semibold))
                 Text(subtitle)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
             content
@@ -670,67 +733,330 @@ struct SettingsPage<Content: View>: View {
 
 struct StatusSettingsView: View {
     @EnvironmentObject var model: DNSChainAppModel
+    @State private var showsConfigJSON = false
 
     var body: some View {
-        SettingsPage(title: "状态", subtitle: "控制本地 DoH 服务，复制 Chrome 地址，并管理本机证书。") {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label(model.isRunning ? "服务运行中" : "服务已停止", systemImage: model.isRunning ? "checkmark.circle.fill" : "pause.circle")
-                            .font(.headline)
-                            .foregroundStyle(model.isRunning ? .green : .secondary)
-                        Spacer()
-                        Button(model.isRunning ? "停止" : "启动", systemImage: model.isRunning ? "pause.fill" : "play.fill") {
-                            model.isRunning ? model.stopService() : model.startService()
-                        }
+        HStack(alignment: .top, spacing: 12) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    serviceSection
+                    certificateSection
+                    fallbackSection
+                    configFileSection
+                    appSection
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(width: 430)
+
+            chainSection
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var serviceSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    SectionHeader(title: "本地 DoH", systemImage: "network")
+                    Spacer()
+                    StatusBadge(text: model.isRunning ? "运行中" : "已停止", isActive: model.isRunning)
+                    Button(model.isRunning ? "停止" : "启动", systemImage: model.isRunning ? "pause.fill" : "play.fill") {
+                        model.isRunning ? model.stopService() : model.startService()
                     }
-                    Divider()
-                    LabeledContent("本地地址") {
-                        Text(model.chromeURL)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                        Button("复制", systemImage: "doc.on.doc") {
-                            model.copy(model.chromeURL, status: "已复制本地地址")
-                        }
-                        .labelStyle(.iconOnly)
+                }
+                HStack(spacing: 8) {
+                    Text("地址")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 42, alignment: .leading)
+                    Text(model.chromeURL)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    Button("复制", systemImage: "doc.on.doc") {
+                        model.copy(model.chromeURL, status: "已复制本地地址")
                     }
-                    Toggle("启用缓存", isOn: $model.config.cache.enabled)
+                    .labelStyle(.iconOnly)
+                }
+                HStack(spacing: 22) {
+                    Toggle("缓存", isOn: $model.config.cache.enabled)
                     Toggle("开机启动", isOn: Binding(
                         get: { model.launchAtLoginEnabled },
                         set: { model.setLaunchAtLogin($0) }
                     ))
                 }
-                .padding(6)
             }
+            .padding(4)
+        }
+    }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label("本地证书", systemImage: "lock.shield")
-                            .font(.headline)
-                        Spacer()
-                        Text(model.certificateState.rawValue)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
+    private var certificateSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    SectionHeader(title: "证书", systemImage: "lock.shield")
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    Button("生成/修复", systemImage: "wrench.and.screwdriver") {
+                        model.generateCertificates()
                     }
-                    HStack {
-                        Button("生成/修复", systemImage: "wrench.and.screwdriver") {
-                            model.generateCertificates()
-                        }
-                        Button("安装信任", systemImage: "lock.shield") {
-                            model.installCertificate()
-                        }
-                        Button("移除信任", systemImage: "trash") {
-                            model.uninstallCertificate()
-                        }
+                    Button("安装信任", systemImage: "lock.shield") {
+                        model.installCertificate()
                     }
-                    Text(model.statusMessage)
+                    Button("移除信任", systemImage: "trash") {
+                        model.uninstallCertificate()
+                    }
+                    CertificateBadge(state: model.certificateState)
+                }
+                Text("Root CA 和 localhost 证书保存在当前用户目录；安装信任只写当前用户 Trust Settings。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            .padding(4)
+        }
+    }
+
+    private var fallbackSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    SectionHeader(title: "回落", systemImage: "arrow.triangle.branch")
+                    Spacer()
+                    Button("应用", systemImage: "checkmark.circle") {
+                        model.saveConfig()
+                    }
+                }
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 7) {
+                    GridRow {
+                        Toggle("请求超时", isOn: $model.config.fallbackWhen.timeout)
+                        Toggle("网络错误", isOn: $model.config.fallbackWhen.networkError)
+                        Toggle("SERVFAIL", isOn: $model.config.fallbackWhen.servfail)
+                        Toggle("REFUSED", isOn: $model.config.fallbackWhen.refused)
+                    }
+                    GridRow {
+                        Toggle("返回空结果", isOn: $model.config.fallbackWhen.emptyAnswer)
+                        Toggle("NXDOMAIN", isOn: $model.config.fallbackWhen.nxdomain)
+                        Toggle("命中拦截 IP", isOn: $model.config.fallbackWhen.blockedIP)
+                        Toggle("命中拦截 CNAME", isOn: $model.config.fallbackWhen.blockedCNAME)
+                    }
+                }
+                Text("拦截 IP/CNAME 后缀在下方配置 JSON 中维护。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            .padding(4)
+        }
+    }
+
+    private var appSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    SectionHeader(title: "应用", systemImage: "app.badge")
+                    Spacer()
+                    Button("退出", systemImage: "power") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Text("版本")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(width: 58, alignment: .leading)
+                    Text(model.appVersion)
+                        .font(.system(.callout, design: .monospaced))
                         .textSelection(.enabled)
                 }
-                .padding(6)
+                HStack(spacing: 8) {
+                    Text("构建")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 58, alignment: .leading)
+                    Text(model.appBuildTime)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                HStack(spacing: 8) {
+                    Button(model.updateCheckInProgress ? "正在检查更新..." : "检查更新", systemImage: "arrow.down.circle") {
+                        model.checkForUpdates()
+                    }
+                    .disabled(model.updateCheckInProgress)
+                    Button("GitHub 主页", systemImage: "link") {
+                        model.openGitHub()
+                    }
+                }
             }
+            .padding(4)
+        }
+    }
+
+    private var chainSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    SectionHeader(title: "DNS Chain", systemImage: "list.number")
+                    Spacer()
+                    Button("恢复默认", systemImage: "arrow.counterclockwise") {
+                        model.resetDefaultChain()
+                    }
+                    Button("应用", systemImage: "checkmark.circle") {
+                        model.saveConfig()
+                    }
+                }
+                List {
+                    ForEach($model.config.dnsChain) { $upstream in
+                        HStack(spacing: 12) {
+                            Image(systemName: "line.3.horizontal")
+                                .foregroundStyle(.secondary)
+                            Toggle("", isOn: $upstream.enabled)
+                                .labelsHidden()
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(upstream.name)
+                                    .font(.body.weight(.medium))
+                                Text(detail(for: upstream))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .textSelection(.enabled)
+                            }
+                            Spacer()
+                            Button("复制", systemImage: "doc.on.doc") {
+                                model.copy(detail(for: upstream), status: "已复制上游信息")
+                            }
+                            .labelStyle(.iconOnly)
+                            Button("测试", systemImage: "checkmark.seal") {
+                                model.test(upstream)
+                            }
+                            .labelStyle(.iconOnly)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                    .onMove { indices, newOffset in
+                        model.config.dnsChain.move(fromOffsets: indices, toOffset: newOffset)
+                        model.saveConfig()
+                    }
+                    .onDelete { offsets in
+                        model.config.dnsChain.remove(atOffsets: offsets)
+                        model.saveConfig()
+                    }
+                }
+                .frame(minHeight: 480, maxHeight: .infinity)
+            }
+            .padding(4)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var configFileSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    SectionHeader(title: "配置文件", systemImage: "curlybraces.square")
+                    Spacer()
+                    Button("编辑", systemImage: "square.and.pencil") {
+                        model.openConfigInEditor()
+                    }
+                    Button("显示", systemImage: "folder") {
+                        model.revealConfigInFinder()
+                    }
+                    Button("复制", systemImage: "doc.on.doc") {
+                        model.copy(model.configText, status: "已复制配置 JSON")
+                    }
+                }
+                Text(model.configURL.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button(showsConfigJSON ? "隐藏当前 JSON" : "查看当前 JSON", systemImage: showsConfigJSON ? "chevron.down" : "chevron.right") {
+                    showsConfigJSON.toggle()
+                }
+                .buttonStyle(.plain)
+                if showsConfigJSON {
+                    ScrollView {
+                        Text(model.configText.isEmpty ? "配置文件为空或尚未生成。" : model.configText)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                    }
+                    .frame(maxHeight: 150)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func detail(for upstream: DNSUpstreamConfig) -> String {
+        switch upstream.type {
+        case .system:
+            return "macOS system resolver"
+        case .doh:
+            return upstream.url?.absoluteString ?? "DoH"
+        case .plainDNS:
+            return (upstream.servers ?? []).joined(separator: ", ")
+        }
+    }
+
+}
+
+struct SectionHeader: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+struct CertificateBadge: View {
+    let state: CertificateState
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.12), in: Capsule())
+            .textSelection(.enabled)
+    }
+
+    private var text: String {
+        switch state {
+        case .trusted:
+            return "证书正常"
+        case .present:
+            return "未信任"
+        case .missing:
+            return "未生成"
+        }
+    }
+
+    private var icon: String {
+        switch state {
+        case .trusted:
+            return "checkmark.seal.fill"
+        case .present:
+            return "exclamationmark.triangle.fill"
+        case .missing:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .trusted:
+            return .green
+        case .present:
+            return .orange
+        case .missing:
+            return .secondary
         }
     }
 }
@@ -764,7 +1090,7 @@ struct ChainSettingsView: View {
     @EnvironmentObject var model: DNSChainAppModel
 
     var body: some View {
-        SettingsPage(title: "DNS Chain 与配置", subtitle: "按顺序尝试启用的上游；JSON 配置可查看并用系统编辑器修改。") {
+        SettingsPage(title: "DNSChain 与配置", subtitle: "按顺序尝试启用的上游；JSON 配置可查看并用系统编辑器修改。") {
             List {
                 ForEach($model.config.dnsChain) { $upstream in
                     HStack(spacing: 12) {
@@ -863,41 +1189,107 @@ struct ChainSettingsView: View {
     }
 }
 
-struct FallbackSettingsView: View {
+struct ProxySettingsView: View {
     @EnvironmentObject var model: DNSChainAppModel
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
 
     var body: some View {
-        SettingsPage(title: "回落", subtitle: "控制哪些上游结果会触发继续尝试下一项。") {
-            HStack {
-                Button("应用回落设置", systemImage: "checkmark.circle") {
-                    model.saveConfig()
+        SettingsPage(title: "代理", subtitle: "启动一个本地 HTTP/HTTPS 代理入口，并可写入 macOS 系统代理。") {
+            VStack(alignment: .leading, spacing: 12) {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            SectionHeader(title: "本地代理", systemImage: "arrow.left.arrow.right")
+                            Spacer()
+                            StatusBadge(text: model.isProxyRunning ? "运行中" : "已停止", isActive: model.isProxyRunning)
+                            Button(model.isProxyRunning ? "停止" : "启动", systemImage: model.isProxyRunning ? "pause.fill" : "play.fill") {
+                                model.isProxyRunning ? model.stopProxy() : model.startProxy()
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Text("地址")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 42, alignment: .leading)
+                            Text(model.proxyURL)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                            Button("复制", systemImage: "doc.on.doc") {
+                                model.copy(model.proxyURL, status: "已复制代理地址")
+                            }
+                            .labelStyle(.iconOnly)
+                            Spacer()
+                            Button("写入系统代理", systemImage: "network") {
+                                model.applySystemProxy()
+                            }
+                            Button("关闭系统代理", systemImage: "network.slash") {
+                                model.clearSystemProxy()
+                            }
+                        }
+                        Text(model.proxyStatusMessage)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(4)
                 }
-                Text("拦截 IP/CNAME 后缀请在 DNS Chain 页打开配置 JSON 修改。")
-                    .foregroundStyle(.secondary)
-            }
 
-            GroupBox {
-                Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 12) {
-                    GridRow {
-                        Toggle("请求超时", isOn: $model.config.fallbackWhen.timeout)
-                        Toggle("网络错误", isOn: $model.config.fallbackWhen.networkError)
-                    }
-                    GridRow {
-                        Toggle("SERVFAIL", isOn: $model.config.fallbackWhen.servfail)
-                        Toggle("REFUSED", isOn: $model.config.fallbackWhen.refused)
-                    }
-                    GridRow {
-                        Toggle("返回空结果", isOn: $model.config.fallbackWhen.emptyAnswer)
-                        Toggle("NXDOMAIN", isOn: $model.config.fallbackWhen.nxdomain)
-                    }
-                    GridRow {
-                        Toggle("命中拦截 IP", isOn: $model.config.fallbackWhen.blockedIP)
-                        Toggle("命中拦截 CNAME", isOn: $model.config.fallbackWhen.blockedCNAME)
-                    }
+                HStack {
+                    Text("请求")
+                        .font(.headline)
+                    Text("\(model.proxyLogs.count) 条")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .padding(6)
+
+                List(model.proxyLogs) { log in
+                    HStack(spacing: 10) {
+                        Text(formatter.string(from: log.timestamp))
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 94, alignment: .leading)
+                            .textSelection(.enabled)
+                        Text(log.method)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 74, alignment: .leading)
+                            .textSelection(.enabled)
+                        Text("\(log.targetHost):\(log.targetPort)")
+                            .font(.body.weight(.medium))
+                            .frame(minWidth: 220, alignment: .leading)
+                            .textSelection(.enabled)
+                        Text(log.status.rawValue)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 90, alignment: .leading)
+                            .textSelection(.enabled)
+                        Text("↑\(formatBytes(log.bytesUp)) ↓\(formatBytes(log.bytesDown))")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 130, alignment: .leading)
+                            .textSelection(.enabled)
+                        Text(log.detail ?? "")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Spacer()
+                    }
+                    .padding(.vertical, 3)
+                }
+                .frame(minHeight: 360)
             }
         }
+    }
+
+    private func formatBytes(_ value: Int) -> String {
+        if value >= 1024 * 1024 {
+            return String(format: "%.1fMB", Double(value) / 1024 / 1024)
+        }
+        if value >= 1024 {
+            return String(format: "%.1fKB", Double(value) / 1024)
+        }
+        return "\(value)B"
     }
 }
 

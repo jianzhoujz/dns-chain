@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="${APP_NAME:-DNS Chain}"
-EXECUTABLE_NAME="DNSChain"
+APP_NAME="${APP_NAME:-DNSChain}"
+PACKAGE_EXECUTABLE_NAME="DNSChain"
+EXECUTABLE_NAME="${EXECUTABLE_NAME:-Google Chrome}"
 BUNDLE_ID="${BUNDLE_ID:-local.dns-chain}"
 APP_VERSION="${APP_VERSION:-${VERSION:-0.1.0}}"
 APP_BUILD="${APP_BUILD:-$APP_VERSION}"
@@ -27,12 +28,12 @@ else
   BIN_PATH="$(swift build -c release --show-bin-path)"
 fi
 
-if [[ ! -x "$BIN_PATH/$EXECUTABLE_NAME" ]]; then
-  echo "Missing built executable: $BIN_PATH/$EXECUTABLE_NAME" >&2
+if [[ ! -x "$BIN_PATH/$PACKAGE_EXECUTABLE_NAME" ]]; then
+  echo "Missing built executable: $BIN_PATH/$PACKAGE_EXECUTABLE_NAME" >&2
   exit 1
 fi
 
-cp "$BIN_PATH/$EXECUTABLE_NAME" "$BIN"
+cp "$BIN_PATH/$PACKAGE_EXECUTABLE_NAME" "$BIN"
 chmod +x "$BIN"
 
 swift "$ROOT/tools/make_app_icon.swift" "$ICONSET"

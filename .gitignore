@@ -4,3 +4,4 @@ build/
 dist/
 DerivedData/
 *.xcuserdata/
+.DS_Store
