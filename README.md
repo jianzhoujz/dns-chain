@@ -24,7 +24,6 @@ https://localhost:8053/dns-query
 - 默认保护内网后缀，如 `.local`、`.lan`、`.home.arpa`、`.corp`、`.internal`。
 - 内存 TTL 缓存和最近 1000 条查询日志。
 - 日志展示每次查询的 qtype、最终状态、每个 fallback attempt 和 DNS answer。
-- 本地 HTTP/HTTPS 代理入口，支持写入/关闭 macOS 系统代理，并展示代理请求列表。
 - 用 Swift 生成本机 Root CA 和 localhost 证书；信任安装/卸载通过 macOS `security` 命令完成。
 - 配置文件固定在 `~/.config/dns-chain/config.json`，界面可查看、复制、在 Finder 中显示，并可用系统编辑器打开。
 - 支持开机启动。
@@ -116,23 +115,23 @@ xattr -dr com.apple.quarantine "/Applications/DNSChain.app"
 ```json
 {
   "blocked_answers": {
-    "cname_suffixes": [".oneagent-filter.alibaba-inc.com"],
+    "cname_suffixes": [".blocked-cname.example"],
     "ip_cidrs": []
   }
 }
 ```
 
-命中 blocked CNAME 或 blocked IP 后，resolver 会继续尝试后续 upstream。
+命中 blocked CNAME 或 blocked IP 后，resolver 会继续尝试后续 upstream。拦截 CNAME 后缀和 IP CIDR 只来自配置文件。
 
-## 本地代理
+`fallback_when` 支持配置 timeout、network error、SERVFAIL、REFUSED、empty answer、NXDOMAIN、blocked IP、blocked CNAME 和 invalid response。默认不对合法 no-data 的 `empty_answer` fallback。
 
-“代理”页可以启动一个本地 HTTP/HTTPS 代理入口：
+如果 system DNS 返回 blocked CNAME 或 blocked IP，DNSChain 会把原始查询域名记录到：
 
 ```text
-127.0.0.1:8080
+~/.config/dns-chain/system-bypass.txt
 ```
 
-代理支持普通 HTTP 请求转发和 HTTPS `CONNECT` 隧道，并在界面中显示请求方法、目标地址、状态和上下行字节数。需要让系统流量统一走这个入口时，可以点击“写入系统代理”；恢复时点击“关闭系统代理”。
+该文件一行一个域名。后续查询如果 exact 命中或属于其子域名，会直接跳过 system DNS，从后续 upstream 开始尝试。
 
 ## Chrome 配置
 
@@ -185,7 +184,7 @@ open "build/DNSChain.app"
 发布构建可指定版本：
 
 ```bash
-APP_VERSION=0.1.1 APP_BUILD=0.1.1 ./package-dmg.sh
+APP_VERSION=0.1.2 APP_BUILD=0.1.2 ./package-dmg.sh
 ```
 
 ## 系统要求
@@ -212,7 +211,6 @@ https://localhost:8053/dns-query
 - Protected internal suffixes such as `.local`, `.lan`, `.home.arpa`, `.corp`, and `.internal`.
 - In-memory TTL cache and recent query logs.
 - Per-query attempt details, including qtype, fallback attempts, final upstream, RCODE, and answers.
-- Local HTTP/HTTPS proxy endpoint with system proxy apply/clear controls and request logs.
 - Local Root CA and localhost certificate generation in Swift.
 - Config file at `~/.config/dns-chain/config.json`.
 - Launch at login and GitHub release update checks.

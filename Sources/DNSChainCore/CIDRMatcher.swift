@@ -61,7 +61,7 @@ public struct BlockedAnswerMatcher: Sendable {
     public init(config: BlockedAnswersConfig) {
         self.cidrs = config.ipCIDRs.compactMap(IPAddressCIDR.init)
         self.cnameSuffixes = config.cnameSuffixes.map {
-            $0.lowercased().hasPrefix(".") ? $0.lowercased() : "." + $0.lowercased()
+            DNSMessage.normalizeName($0.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
         }
     }
 
@@ -77,7 +77,7 @@ public struct BlockedAnswerMatcher: Sendable {
     public func blockedCNAME(in answers: [DNSAnswer]) -> String? {
         for answer in answers where answer.type == .cname {
             let value = DNSMessage.normalizeName(answer.value)
-            if cnameSuffixes.contains(where: { value.hasSuffix(DNSMessage.normalizeName($0)) }) {
+            if cnameSuffixes.contains(where: { value == $0 || value.hasSuffix("." + $0) }) {
                 return answer.value
             }
         }

@@ -26,16 +26,35 @@ private func menuBarOctopusImage(isRunning: Bool) -> NSImage {
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size)
     image.lockFocus()
-    defer { image.unlockFocus() }
 
-    if !isRunning {
-        NSGraphicsContext.current?.cgContext.setAlpha(0.32)
-    }
     let font = NSFont(name: "Apple Color Emoji", size: 15) ?? NSFont.systemFont(ofSize: 15)
     let text = NSAttributedString(string: "🐙", attributes: [.font: font])
     let textSize = text.size()
     text.draw(at: NSPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2 + 1))
+    image.unlockFocus()
+
+    if !isRunning {
+        return grayscaleMenuBarImage(from: image, size: size)
+    }
     return image
+}
+
+private func grayscaleMenuBarImage(from image: NSImage, size: NSSize) -> NSImage {
+    guard let data = image.tiffRepresentation,
+          let input = CIImage(data: data),
+          let filter = CIFilter(name: "CIColorControls") else {
+        return image
+    }
+    filter.setValue(input, forKey: kCIInputImageKey)
+    filter.setValue(0, forKey: kCIInputSaturationKey)
+    filter.setValue(-0.12, forKey: kCIInputBrightnessKey)
+    filter.setValue(0.82, forKey: kCIInputContrastKey)
+
+    guard let output = filter.outputImage,
+          let cgImage = CIContext().createCGImage(output, from: input.extent) else {
+        return image
+    }
+    return NSImage(cgImage: cgImage, size: size)
 }
 
 private struct GitHubRelease {
@@ -89,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         let model = DNSChainAppModel.shared
+        installMainMenu()
         installStatusItem(model: model)
         observer = NotificationCenter.default.addObserver(
             forName: .dnsChainRunningChanged,
@@ -120,6 +140,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItemController = StatusItemController(model: model)
         }
         statusItemController?.updateIcon(isRunning: model.isRunning)
+    }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "退出 DNSChain", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenuItem.submenu = windowMenu
+
+        NSApplication.shared.mainMenu = mainMenu
     }
 }
 
@@ -166,11 +204,9 @@ final class DNSChainAppModel: ObservableObject {
     @Published var statusMessage = "正在加载配置..."
     @Published var certificateState: CertificateState = .missing
     @Published var configText = ""
+    @Published var systemBypassText = ""
     @Published var launchAtLoginEnabled = false
     @Published var updateCheckInProgress = false
-    @Published var isProxyRunning = false
-    @Published var proxyLogs: [ProxyRequestLog] = []
-    @Published var proxyStatusMessage = "代理未启动"
 
     private let store = ConfigStore()
     private let certificateManager = CertificateManager()
@@ -178,21 +214,15 @@ final class DNSChainAppModel: ObservableObject {
     private var resolver: ChainResolver?
     private var server: LocalDoHServer?
     private var logRefreshTask: Task<Void, Never>?
-    private let proxyLogStore = ProxyRequestLogStore(maxEntries: 1000)
-    private var proxyServer: LocalHTTPProxyServer?
-    private var proxyRefreshTask: Task<Void, Never>?
 
     init() {
         do {
             config = try store.loadOrCreateDefault()
             launchAtLoginEnabled = loginItemManager.isEnabled()
-            if config.launchAtLogin != launchAtLoginEnabled {
-                config.launchAtLogin = launchAtLoginEnabled
-                try? store.save(config)
-            }
             certificateState = certificateManager.state()
             resolver = ChainResolver(config: config)
             refreshConfigText()
+            refreshSystemBypassText()
             statusMessage = "已加载配置"
             Task { @MainActor in
                 self.startService()
@@ -206,12 +236,12 @@ final class DNSChainAppModel: ObservableObject {
         "https://localhost:\(config.server.listenPort)\(config.server.dohPath)"
     }
 
-    var proxyURL: String {
-        "\(config.proxy.listenHost):\(config.proxy.listenPort)"
-    }
-
     var configURL: URL {
         store.configURL
+    }
+
+    var systemBypassURL: URL {
+        SystemBypassStore.defaultFileURL()
     }
 
     var enabledUpstreamCount: Int {
@@ -256,55 +286,14 @@ final class DNSChainAppModel: ObservableObject {
         logRefreshTask?.cancel()
     }
 
-    func startProxy() {
-        guard !isProxyRunning else { return }
-        do {
-            let server = LocalHTTPProxyServer(config: config.proxy, logs: proxyLogStore)
-            try server.start()
-            proxyServer = server
-            isProxyRunning = true
-            proxyStatusMessage = "代理运行中"
-            startProxyLogRefresh()
-        } catch {
-            isProxyRunning = false
-            proxyStatusMessage = "代理启动失败：\(String(describing: error))"
-        }
-    }
-
-    func stopProxy() {
-        proxyServer?.stop()
-        proxyServer = nil
-        isProxyRunning = false
-        proxyStatusMessage = "代理已停止"
-        proxyRefreshTask?.cancel()
-    }
-
-    func applySystemProxy() {
-        do {
-            try setSystemProxy(enabled: true)
-            proxyStatusMessage = "已写入系统代理"
-        } catch {
-            proxyStatusMessage = "写入系统代理失败：\(error.localizedDescription)"
-        }
-    }
-
-    func clearSystemProxy() {
-        do {
-            try setSystemProxy(enabled: false)
-            proxyStatusMessage = "已关闭系统代理"
-        } catch {
-            proxyStatusMessage = "关闭系统代理失败：\(error.localizedDescription)"
-        }
-    }
-
     func saveConfig() {
         do {
-            config.launchAtLogin = launchAtLoginEnabled
             try store.save(config)
             Task {
                 await resolver?.updateConfig(config)
             }
             refreshConfigText()
+            refreshSystemBypassText()
             statusMessage = "配置已保存"
         } catch {
             statusMessage = "保存失败：\(String(describing: error))"
@@ -317,6 +306,7 @@ final class DNSChainAppModel: ObservableObject {
             launchAtLoginEnabled = loginItemManager.isEnabled()
             resolver = ChainResolver(config: config)
             refreshConfigText()
+            refreshSystemBypassText()
             statusMessage = "配置已重新加载"
             if isRunning {
                 stopService()
@@ -368,13 +358,9 @@ final class DNSChainAppModel: ObservableObject {
         do {
             try loginItemManager.setEnabled(enabled)
             launchAtLoginEnabled = enabled
-            config.launchAtLogin = enabled
-            try store.save(config)
-            refreshConfigText()
             statusMessage = enabled ? "已开启开机启动" : "已关闭开机启动"
         } catch {
             launchAtLoginEnabled = loginItemManager.isEnabled()
-            config.launchAtLogin = launchAtLoginEnabled
             statusMessage = "开机启动设置失败：\(String(describing: error))"
         }
     }
@@ -392,6 +378,27 @@ final class DNSChainAppModel: ObservableObject {
 
     func revealConfigInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([configURL])
+    }
+
+    func openSystemBypassInEditor() {
+        do {
+            try ensureSystemBypassFileExists()
+            refreshSystemBypassText()
+            NSWorkspace.shared.open(systemBypassURL)
+            statusMessage = "已打开 System Bypass 文件"
+        } catch {
+            statusMessage = "打开 System Bypass 失败：\(String(describing: error))"
+        }
+    }
+
+    func revealSystemBypassInFinder() {
+        do {
+            try ensureSystemBypassFileExists()
+            NSWorkspace.shared.activateFileViewerSelecting([systemBypassURL])
+            statusMessage = "已显示 System Bypass 文件"
+        } catch {
+            statusMessage = "显示 System Bypass 失败：\(String(describing: error))"
+        }
     }
 
     func copyStatus() {
@@ -469,6 +476,18 @@ final class DNSChainAppModel: ObservableObject {
 
     private func refreshConfigText() {
         configText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+    }
+
+    private func refreshSystemBypassText() {
+        systemBypassText = (try? String(contentsOf: systemBypassURL, encoding: .utf8)) ?? ""
+    }
+
+    private func ensureSystemBypassFileExists() throws {
+        let directory = systemBypassURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: systemBypassURL.path) {
+            try "".write(to: systemBypassURL, atomically: true, encoding: .utf8)
+        }
     }
 
     private func finishUpdateCheck(response: URLResponse?, error: Error?) {
@@ -559,71 +578,13 @@ final class DNSChainAppModel: ObservableObject {
                 let entries = await self.resolver?.recentLogs(limit: 100) ?? []
                 await MainActor.run {
                     self.logs = entries
+                    self.refreshSystemBypassText()
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
     }
 
-    private func startProxyLogRefresh() {
-        proxyRefreshTask?.cancel()
-        proxyRefreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let entries = await self.proxyLogStore.recent(limit: 200)
-                await MainActor.run {
-                    self.proxyLogs = entries
-                }
-                try? await Task.sleep(nanoseconds: 800_000_000)
-            }
-        }
-    }
-
-    private func setSystemProxy(enabled: Bool) throws {
-        let services = try networkServices()
-        guard !services.isEmpty else {
-            throw NSError(domain: "DNSChainProxy", code: 1, userInfo: [NSLocalizedDescriptionKey: "没有找到可配置的网络服务"])
-        }
-
-        for service in services {
-            if enabled {
-                try runNetworksetup(["-setwebproxy", service, config.proxy.listenHost, String(config.proxy.listenPort)])
-                try runNetworksetup(["-setsecurewebproxy", service, config.proxy.listenHost, String(config.proxy.listenPort)])
-                try runNetworksetup(["-setwebproxystate", service, "on"])
-                try runNetworksetup(["-setsecurewebproxystate", service, "on"])
-            } else {
-                try runNetworksetup(["-setwebproxystate", service, "off"])
-                try runNetworksetup(["-setsecurewebproxystate", service, "off"])
-            }
-        }
-    }
-
-    private func networkServices() throws -> [String] {
-        let output = try runNetworksetup(["-listallnetworkservices"])
-        return output
-            .split(separator: "\n")
-            .dropFirst()
-            .map(String.init)
-            .filter { !$0.hasPrefix("*") && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    }
-
-    @discardableResult
-    private func runNetworksetup(_ arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "DNSChainProxy", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output.trimmingCharacters(in: .whitespacesAndNewlines)])
-        }
-        return output
-    }
 }
 
 extension Notification.Name {
@@ -670,6 +631,7 @@ final class SettingsWindowPresenter: NSObject, NSWindowDelegate {
         )
         window.title = "DNSChain 设置"
         window.contentView = NSHostingView(rootView: content)
+        window.addTitlebarAccessoryViewController(makeQuitAccessory())
         window.center()
         window.delegate = self
         self.window = window
@@ -692,6 +654,33 @@ final class SettingsWindowPresenter: NSObject, NSWindowDelegate {
             self.window = nil
         }
     }
+
+    private func makeQuitAccessory() -> NSTitlebarAccessoryViewController {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 38, height: 28))
+        let button = NSButton(image: titlebarQuitImage(), target: self, action: #selector(quitApp))
+        button.isBordered = false
+        button.controlSize = .regular
+        button.imagePosition = .imageOnly
+        button.toolTip = "退出 DNSChain (⌘Q)"
+        button.frame = NSRect(x: 0, y: 0, width: 28, height: 28)
+        container.addSubview(button)
+
+        let controller = NSTitlebarAccessoryViewController()
+        controller.view = container
+        controller.layoutAttribute = .right
+        return controller
+    }
+
+    private func titlebarQuitImage() -> NSImage {
+        let image = NSImage(systemSymbolName: "power", accessibilityDescription: "退出 DNSChain") ?? NSImage()
+        image.isTemplate = true
+        image.size = NSSize(width: 13, height: 13)
+        return image
+    }
+
+    @objc private func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
 }
 
 struct SettingsRootView: View {
@@ -701,8 +690,6 @@ struct SettingsRootView: View {
         TabView {
             StatusSettingsView()
                 .tabItem { Label("DNS Chain", systemImage: "list.number") }
-            ProxySettingsView()
-                .tabItem { Label("代理", systemImage: "arrow.left.arrow.right") }
             LogSettingsView()
                 .tabItem { Label("日志", systemImage: "doc.text.magnifyingglass") }
         }
@@ -734,6 +721,7 @@ struct SettingsPage<Content: View>: View {
 struct StatusSettingsView: View {
     @EnvironmentObject var model: DNSChainAppModel
     @State private var showsConfigJSON = false
+    @State private var showsSystemBypass = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -743,6 +731,7 @@ struct StatusSettingsView: View {
                     certificateSection
                     fallbackSection
                     configFileSection
+                    systemBypassSection
                     appSection
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -830,21 +819,29 @@ struct StatusSettingsView: View {
                         model.saveConfig()
                     }
                 }
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 7) {
+                Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 10) {
                     GridRow {
-                        Toggle("请求超时", isOn: $model.config.fallbackWhen.timeout)
-                        Toggle("网络错误", isOn: $model.config.fallbackWhen.networkError)
-                        Toggle("SERVFAIL", isOn: $model.config.fallbackWhen.servfail)
-                        Toggle("REFUSED", isOn: $model.config.fallbackWhen.refused)
+                        fallbackToggle("请求超时", isOn: $model.config.fallbackWhen.timeout)
+                        fallbackToggle("网络错误", isOn: $model.config.fallbackWhen.networkError)
                     }
                     GridRow {
-                        Toggle("返回空结果", isOn: $model.config.fallbackWhen.emptyAnswer)
-                        Toggle("NXDOMAIN", isOn: $model.config.fallbackWhen.nxdomain)
-                        Toggle("命中拦截 IP", isOn: $model.config.fallbackWhen.blockedIP)
-                        Toggle("命中拦截 CNAME", isOn: $model.config.fallbackWhen.blockedCNAME)
+                        fallbackToggle("SERVFAIL", isOn: $model.config.fallbackWhen.servfail)
+                        fallbackToggle("REFUSED", isOn: $model.config.fallbackWhen.refused)
+                    }
+                    GridRow {
+                        fallbackToggle("返回空结果", isOn: $model.config.fallbackWhen.emptyAnswer)
+                        fallbackToggle("NXDOMAIN", isOn: $model.config.fallbackWhen.nxdomain)
+                    }
+                    GridRow {
+                        fallbackToggle("拦截 IP", isOn: $model.config.fallbackWhen.blockedIP)
+                        fallbackToggle("拦截 CNAME", isOn: $model.config.fallbackWhen.blockedCNAME)
+                    }
+                    GridRow {
+                        fallbackToggle("非法响应", isOn: $model.config.fallbackWhen.invalidResponse)
+                        Color.clear.frame(width: 160, height: 1)
                     }
                 }
-                Text("拦截 IP/CNAME 后缀在下方配置 JSON 中维护。")
+                Text("拦截 IP/CNAME 后缀在配置 JSON 中维护；命中 system DNS 拦截的查询会写入 system-bypass.txt。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -853,15 +850,17 @@ struct StatusSettingsView: View {
         }
     }
 
+    private func fallbackToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        Toggle(title, isOn: isOn)
+            .frame(width: 160, alignment: .leading)
+    }
+
     private var appSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
                     SectionHeader(title: "应用", systemImage: "app.badge")
                     Spacer()
-                    Button("退出", systemImage: "power") {
-                        NSApplication.shared.terminate(nil)
-                    }
                 }
                 HStack(spacing: 8) {
                     Text("版本")
@@ -991,6 +990,49 @@ struct StatusSettingsView: View {
         }
     }
 
+    private var systemBypassSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    SectionHeader(title: "System Bypass", systemImage: "forward.end")
+                    Spacer()
+                    Button("编辑", systemImage: "square.and.pencil") {
+                        model.openSystemBypassInEditor()
+                    }
+                    Button("显示", systemImage: "folder") {
+                        model.revealSystemBypassInFinder()
+                    }
+                    Button("复制", systemImage: "doc.on.doc") {
+                        model.copy(model.systemBypassText, status: "已复制 System Bypass")
+                    }
+                }
+                Text(model.systemBypassURL.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text("一行一个域名；命中该域名或其子域名时跳过 system DNS。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button(showsSystemBypass ? "隐藏当前列表" : "查看当前列表", systemImage: showsSystemBypass ? "chevron.down" : "chevron.right") {
+                    showsSystemBypass.toggle()
+                }
+                .buttonStyle(.plain)
+                if showsSystemBypass {
+                    ScrollView {
+                        Text(model.systemBypassText.isEmpty ? "System Bypass 文件为空或尚未生成。" : model.systemBypassText)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                    }
+                    .frame(maxHeight: 120)
+                }
+            }
+            .padding(4)
+        }
+    }
+
     private func detail(for upstream: DNSUpstreamConfig) -> String {
         switch upstream.type {
         case .system:
@@ -1082,7 +1124,7 @@ struct InfoTile: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 4))
     }
 }
 
@@ -1189,113 +1231,9 @@ struct ChainSettingsView: View {
     }
 }
 
-struct ProxySettingsView: View {
-    @EnvironmentObject var model: DNSChainAppModel
-    private let formatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss.SSS"
-        return formatter
-    }()
-
-    var body: some View {
-        SettingsPage(title: "代理", subtitle: "启动一个本地 HTTP/HTTPS 代理入口，并可写入 macOS 系统代理。") {
-            VStack(alignment: .leading, spacing: 12) {
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            SectionHeader(title: "本地代理", systemImage: "arrow.left.arrow.right")
-                            Spacer()
-                            StatusBadge(text: model.isProxyRunning ? "运行中" : "已停止", isActive: model.isProxyRunning)
-                            Button(model.isProxyRunning ? "停止" : "启动", systemImage: model.isProxyRunning ? "pause.fill" : "play.fill") {
-                                model.isProxyRunning ? model.stopProxy() : model.startProxy()
-                            }
-                        }
-                        HStack(spacing: 8) {
-                            Text("地址")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 42, alignment: .leading)
-                            Text(model.proxyURL)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
-                            Button("复制", systemImage: "doc.on.doc") {
-                                model.copy(model.proxyURL, status: "已复制代理地址")
-                            }
-                            .labelStyle(.iconOnly)
-                            Spacer()
-                            Button("写入系统代理", systemImage: "network") {
-                                model.applySystemProxy()
-                            }
-                            Button("关闭系统代理", systemImage: "network.slash") {
-                                model.clearSystemProxy()
-                            }
-                        }
-                        Text(model.proxyStatusMessage)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    .padding(4)
-                }
-
-                HStack {
-                    Text("请求")
-                        .font(.headline)
-                    Text("\(model.proxyLogs.count) 条")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                List(model.proxyLogs) { log in
-                    HStack(spacing: 10) {
-                        Text(formatter.string(from: log.timestamp))
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(width: 94, alignment: .leading)
-                            .textSelection(.enabled)
-                        Text(log.method)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(width: 74, alignment: .leading)
-                            .textSelection(.enabled)
-                        Text("\(log.targetHost):\(log.targetPort)")
-                            .font(.body.weight(.medium))
-                            .frame(minWidth: 220, alignment: .leading)
-                            .textSelection(.enabled)
-                        Text(log.status.rawValue)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(width: 90, alignment: .leading)
-                            .textSelection(.enabled)
-                        Text("↑\(formatBytes(log.bytesUp)) ↓\(formatBytes(log.bytesDown))")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 130, alignment: .leading)
-                            .textSelection(.enabled)
-                        Text(log.detail ?? "")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        Spacer()
-                    }
-                    .padding(.vertical, 3)
-                }
-                .frame(minHeight: 360)
-            }
-        }
-    }
-
-    private func formatBytes(_ value: Int) -> String {
-        if value >= 1024 * 1024 {
-            return String(format: "%.1fMB", Double(value) / 1024 / 1024)
-        }
-        if value >= 1024 {
-            return String(format: "%.1fKB", Double(value) / 1024)
-        }
-        return "\(value)B"
-    }
-}
-
 struct LogSettingsView: View {
     @EnvironmentObject var model: DNSChainAppModel
-    @State private var expandedLogIDs: Set<UUID> = []
+    private static let tableWidth: CGFloat = 1720
     private let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
@@ -1303,131 +1241,346 @@ struct LogSettingsView: View {
     }()
 
     var body: some View {
-        SettingsPage(title: "日志", subtitle: "最近的 DNS 查询、最终上游和响应状态。") {
-            HStack {
+        SettingsPage(title: "日志", subtitle: "最近的 DNS 查询、尝试链、最终上游和响应状态。") {
+            HStack(spacing: 12) {
+                Text("\(model.logs.count) 条")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 48, alignment: .leading)
+                RCodeLegendView()
+                Spacer()
                 Button("复制全部日志", systemImage: "doc.on.doc") {
                     model.copyLogs()
                 }
-                Text("\(model.logs.count) 条")
-                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
 
-            List {
-                ForEach(model.logs) { log in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button {
-                            toggle(log.id)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: expandedLogIDs.contains(log.id) ? "chevron.down" : "chevron.right")
-                                    .foregroundStyle(.secondary)
-                                Text(formatter.string(from: log.timestamp))
-                                    .font(.system(.body, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .frame(width: 95, alignment: .leading)
-                                Text(log.domain)
-                                    .font(.body.weight(.medium))
-                                    .textSelection(.enabled)
-                                    .frame(minWidth: 180, alignment: .leading)
-                                Text(dnsQTypeLabel(log.qtype))
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .frame(width: 58, alignment: .leading)
-                                Text(log.result.rawValue)
-                                    .textSelection(.enabled)
-                                    .frame(width: 72, alignment: .leading)
-                                Text(log.finalUpstream ?? "-")
-                                    .textSelection(.enabled)
-                                    .frame(width: 110, alignment: .leading)
-                                Text("RCODE \(log.rcode?.rawValue.description ?? "-")")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                Spacer()
-                                Text("\(log.attempts.count) 次尝试")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
+            GeometryReader { geometry in
+                let tableWidth = max(Self.tableWidth, geometry.size.width)
+                ScrollView(.horizontal) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        logHeader
+                            .frame(width: tableWidth, alignment: .leading)
 
-                        if expandedLogIDs.contains(log.id) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(Array(log.attempts.enumerated()), id: \.offset) { index, attempt in
-                                    HStack(spacing: 10) {
-                                        Text("#\(index + 1)")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 28, alignment: .leading)
-                                        Text(attempt.upstreamName)
-                                            .textSelection(.enabled)
-                                            .frame(width: 140, alignment: .leading)
-                                        Text(attempt.status.rawValue)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .frame(width: 110, alignment: .leading)
-                                        Text("\(attempt.latencyMs)ms")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                            .frame(width: 70, alignment: .leading)
-                                        Text(attempt.detail ?? "")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                        Spacer()
-                                    }
-                                    .padding(.leading, 24)
-                                }
-                                if log.attempts.isEmpty {
-                                    Text("缓存命中或无上游尝试记录")
+                        ScrollView(.vertical) {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                if model.logs.isEmpty {
+                                    Text("暂无查询日志")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .padding(.leading, 24)
-                                }
-                                if !log.answers.isEmpty {
-                                    Divider()
-                                        .padding(.leading, 24)
-                                    Text("答案")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.leading, 24)
-                                    ForEach(Array(log.answers.enumerated()), id: \.offset) { _, answer in
-                                        HStack(spacing: 10) {
-                                            Text(dnsQTypeLabel(answer.rawType))
-                                                .font(.system(.caption, design: .monospaced))
-                                                .frame(width: 58, alignment: .leading)
-                                            Text(answer.value)
-                                                .textSelection(.enabled)
-                                                .frame(width: 180, alignment: .leading)
-                                            Text("TTL \(answer.ttl)")
-                                                .font(.system(.caption, design: .monospaced))
-                                                .foregroundStyle(.secondary)
-                                                .textSelection(.enabled)
-                                            Text(answer.name)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                                .textSelection(.enabled)
-                                            Spacer()
-                                        }
-                                        .padding(.leading, 24)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 12)
+                                        .frame(width: tableWidth, alignment: .leading)
+                                } else {
+                                    ForEach(Array(model.logs.enumerated()), id: \.element.id) { index, log in
+                                        LogTableRow(log: log, timestamp: formatter.string(from: log.timestamp), isAlternate: index.isMultiple(of: 2))
+                                            .frame(width: tableWidth, alignment: .leading)
                                     }
                                 }
                             }
-                            .padding(.vertical, 4)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .frame(width: tableWidth, height: geometry.size.height, alignment: .topLeading)
+                }
+            }
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+            )
+            .frame(minHeight: 460, maxHeight: .infinity)
+        }
+    }
+
+    private var logHeader: some View {
+        HStack(spacing: 10) {
+            LogColumnHeader("时间", width: 92)
+            LogColumnHeader("域名", width: 230)
+            LogColumnHeader("类型", width: 52)
+            LogColumnHeader("结果", width: 78)
+            LogColumnHeader("最终上游", width: 136)
+            LogColumnHeader("RCODE", width: 78)
+            LogColumnHeader("尝试链", width: 500)
+            LogColumnHeader("答案", width: 360)
+            LogColumnHeader("客户端", width: 94)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+struct LogTableRow: View {
+    let log: QueryLog
+    let timestamp: String
+    let isAlternate: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                LogCell(timestamp, width: 92, monospaced: true)
+                LogCell(log.domain, width: 230, weight: .medium)
+                LogCell(dnsQTypeLabel(log.qtype), width: 52, monospaced: true)
+                LogStatusText(log.result.rawValue, color: queryResultColor(log.result), width: 78)
+                LogCell(log.finalUpstream ?? "-", width: 136)
+                LogStatusText(rcodeLabel(log.rcode), color: rcodeColor(log.rcode), width: 78)
+                attemptChain
+                    .frame(width: 500, alignment: .leading)
+                    .clipped()
+                LogCell(answerSummary(log.answers), width: 360)
+                LogCell(log.client, width: 94, monospaced: true)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(isAlternate ? Color(nsColor: .controlBackgroundColor).opacity(0.38) : Color.clear)
+
+            Divider()
+        }
+    }
+
+    private var attemptChain: some View {
+        HStack(spacing: 6) {
+            if log.attempts.isEmpty {
+                Text("cache")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                ForEach(Array(log.attempts.enumerated()), id: \.offset) { index, attempt in
+                    Text(compactAttemptLabel(attempt, index: index))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(attemptStatusColor(attempt.status))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(attemptStatusColor(attempt.status).opacity(0.11), in: Capsule())
+                        .textSelection(.enabled)
+                        .help(attemptLabel(attempt, index: index))
                 }
             }
         }
     }
 
-    private func toggle(_ id: UUID) {
-        if expandedLogIDs.contains(id) {
-            expandedLogIDs.remove(id)
-        } else {
-            expandedLogIDs.insert(id)
+    private func compactAttemptLabel(_ attempt: AttemptLog, index: Int) -> String {
+        "\(index + 1).\(shortUpstreamName(attempt.upstreamName)) \(shortAttemptStatus(attempt.status)) \(attempt.latencyMs)ms"
+    }
+
+    private func attemptLabel(_ attempt: AttemptLog, index: Int) -> String {
+        let detail = attempt.detail.map { " \($0)" } ?? ""
+        return "#\(index + 1) \(attempt.upstreamName) \(attempt.status.rawValue) \(attempt.latencyMs)ms\(detail)"
+    }
+
+    private func shortUpstreamName(_ name: String) -> String {
+        guard name.count > 14 else { return name }
+        return String(name.prefix(11)) + "..."
+    }
+
+    private func answerSummary(_ answers: [DNSAnswer]) -> String {
+        guard !answers.isEmpty else { return "-" }
+        return answers
+            .prefix(3)
+            .map { "\(dnsQTypeLabel($0.rawType)) \($0.value) TTL \($0.ttl)" }
+            .joined(separator: " | ") + (answers.count > 3 ? " | +\(answers.count - 3)" : "")
+    }
+}
+
+struct RCodeLegendView: View {
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                RCodeLegendItem(code: "NOERROR", meaning: "正常", color: .green)
+                RCodeLegendItem(code: "NXDOMAIN", meaning: "域名不存在", color: .orange)
+                RCodeLegendItem(code: "SERVFAIL", meaning: "上游失败", color: .red)
+                RCodeLegendItem(code: "REFUSED", meaning: "拒绝", color: .red)
+                RCodeLegendItem(code: "FORMERR", meaning: "格式错误", color: .red)
+                RCodeLegendItem(code: "NOTIMP", meaning: "未支持", color: .purple)
+            }
         }
+        .frame(maxWidth: 640, alignment: .leading)
+    }
+}
+
+struct RCodeLegendItem: View {
+    let code: String
+    let meaning: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(code)
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .foregroundStyle(color)
+            Text(meaning)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(color.opacity(0.1), in: Capsule())
+        .help("\(code)：\(meaning)")
+    }
+}
+
+struct LogColumnHeader: View {
+    let title: String
+    let width: CGFloat
+
+    init(_ title: String, width: CGFloat) {
+        self.title = title
+        self.width = width
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: width, alignment: .leading)
+    }
+}
+
+struct LogCell: View {
+    let text: String
+    let width: CGFloat
+    let monospaced: Bool
+    let weight: Font.Weight?
+
+    init(_ text: String, width: CGFloat, monospaced: Bool = false, weight: Font.Weight? = nil) {
+        self.text = text
+        self.width = width
+        self.monospaced = monospaced
+        self.weight = weight
+    }
+
+    var body: some View {
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+            .frame(width: width, alignment: .leading)
+    }
+
+    private var font: Font {
+        if monospaced {
+            return .system(.caption, design: .monospaced)
+        }
+        if let weight {
+            return .system(.body, design: .default).weight(weight)
+        }
+        return .body
+    }
+}
+
+struct LogStatusText: View {
+    let text: String
+    let color: Color
+    let width: CGFloat
+
+    init(_ text: String, color: Color, width: CGFloat) {
+        self.text = text
+        self.color = color
+        self.width = width
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(.caption, design: .monospaced).weight(.semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .textSelection(.enabled)
+            .frame(width: width, alignment: .leading)
+    }
+}
+
+private func queryResultColor(_ result: QueryResult) -> Color {
+    switch result {
+    case .success:
+        return .green
+    case .fallback:
+        return .orange
+    case .failed:
+        return .red
+    case .protected:
+        return .blue
+    case .cached:
+        return .secondary
+    }
+}
+
+private func attemptStatusColor(_ status: AttemptStatus) -> Color {
+    switch status {
+    case .success:
+        return .green
+    case .timeout, .networkError, .servfail, .refused, .invalidResponse:
+        return .red
+    case .nxdomain, .emptyAnswer:
+        return .orange
+    case .blockedIP, .blockedCNAME:
+        return .purple
+    case .protected, .skippedSystem:
+        return .blue
+    }
+}
+
+private func shortAttemptStatus(_ status: AttemptStatus) -> String {
+    switch status {
+    case .success:
+        return "ok"
+    case .timeout:
+        return "timeout"
+    case .networkError:
+        return "net"
+    case .servfail:
+        return "sfail"
+    case .refused:
+        return "refused"
+    case .nxdomain:
+        return "nx"
+    case .emptyAnswer:
+        return "empty"
+    case .blockedIP:
+        return "block-ip"
+    case .blockedCNAME:
+        return "block-cn"
+    case .protected:
+        return "protect"
+    case .skippedSystem:
+        return "skip-sys"
+    case .invalidResponse:
+        return "invalid"
+    }
+}
+
+private func rcodeLabel(_ rcode: DNSRCode?) -> String {
+    guard let rcode else { return "-" }
+    switch rcode {
+    case .noError:
+        return "NOERROR"
+    case .formErr:
+        return "FORMERR"
+    case .servFail:
+        return "SERVFAIL"
+    case .nxDomain:
+        return "NXDOMAIN"
+    case .notImp:
+        return "NOTIMP"
+    case .refused:
+        return "REFUSED"
+    case .other:
+        return "RCODE \(rcode.rawValue)"
+    }
+}
+
+private func rcodeColor(_ rcode: DNSRCode?) -> Color {
+    switch rcode {
+    case .noError:
+        return .green
+    case .formErr, .servFail, .refused, .other:
+        return .red
+    case .nxDomain:
+        return .orange
+    case .notImp:
+        return .purple
+    case nil:
+        return .secondary
     }
 }

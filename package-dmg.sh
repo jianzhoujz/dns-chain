@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="${APP_NAME:-DNSChain}"
-APP_VERSION="${APP_VERSION:-${VERSION:-0.1.1}}"
+APP_VERSION="${APP_VERSION:-${VERSION:-0.1.2}}"
 APP_PATH="$ROOT/build/$APP_NAME.app"
 DIST_DIR="$ROOT/dist"
 WORK_DIR="$ROOT/build/dmg"
@@ -23,7 +23,11 @@ cp -R "$APP_PATH" "$STAGE_DIR/"
 ln -s /Applications "$STAGE_DIR/Applications"
 cp "$DMG_ASSET_DIR/background.tiff" "$STAGE_DIR/.background.tiff"
 cp "$DMG_ASSET_DIR/background.tiff" "$STAGE_DIR/.background/background.tiff"
-cp "$DMG_ASSET_DIR/VolumeIcon.icns" "$STAGE_DIR/.VolumeIcon.icns"
+if [[ -f "$DMG_ASSET_DIR/VolumeIcon.icns" ]]; then
+  cp "$DMG_ASSET_DIR/VolumeIcon.icns" "$STAGE_DIR/.VolumeIcon.icns"
+else
+  cp "$APP_PATH/Contents/Resources/AppIcon.icns" "$STAGE_DIR/.VolumeIcon.icns"
+fi
 cp "$DMG_ASSET_DIR/DS_Store" "$STAGE_DIR/.DS_Store"
 
 hdiutil create \

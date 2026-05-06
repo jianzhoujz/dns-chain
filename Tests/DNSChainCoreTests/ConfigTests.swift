@@ -36,9 +36,20 @@ func decodesConfigWithoutLaunchAtLogin() throws {
       "logging": {
         "enabled": true,
         "max_entries": 1000
-      }
+      },
+      "launch_at_login": true
     }
     """
     let config = try JSONDecoder().decode(DNSChainConfig.self, from: Data(json.utf8))
-    #expect(config.launchAtLogin == false)
+    #expect(config.server.listenHost == "127.0.0.1")
+    #expect(config.fallbackWhen.invalidResponse == true)
+}
+
+@Test
+func defaultConfigKeepsEmptyAnswerFallbackOffAndBlockedCNAMEsEmpty() {
+    let config = DNSChainConfig()
+
+    #expect(config.fallbackWhen.emptyAnswer == false)
+    #expect(config.fallbackWhen.invalidResponse == true)
+    #expect(config.blockedAnswers.cnameSuffixes.isEmpty)
 }

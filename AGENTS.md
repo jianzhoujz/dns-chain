@@ -12,14 +12,6 @@ https://localhost:8053/dns-query
 
 Chrome 或其它客户端把 Secure DNS 指向该地址后，应用按配置的 DNSChain 依次查询 system DNS、DoH upstream、plain DNS upstream，并根据 fallback 条件决定是否继续尝试下一个上游。
 
-应用还提供一个本地 HTTP/HTTPS 代理入口，默认监听：
-
-```text
-127.0.0.1:8080
-```
-
-代理负责接收本地 HTTP 代理请求并原样转发；HTTPS 使用 `CONNECT` 隧道。UI 可写入/关闭 macOS 系统代理，并展示代理请求列表。
-
 核心约束：
 
 - 全 Swift 实现，不引入 Go helper/daemon。
@@ -38,7 +30,6 @@ dns-chain/
 │   │   └── DNSChainApp.swift
 │   └── DNSChainCore/
 │       ├── LocalDoHServer.swift
-│       ├── LocalHTTPProxyServer.swift
 │       ├── ChainResolver.swift
 │       ├── DNSMessage.swift
 │       ├── Config.swift
@@ -65,13 +56,13 @@ dns-chain/
 | --- | --- |
 | `Sources/DNSChain/DNSChainApp.swift` | SwiftUI/AppKit 菜单栏、设置窗口、状态管理、更新检查 |
 | `Sources/DNSChainCore/LocalDoHServer.swift` | SwiftNIO HTTPS DoH server；只处理 NIO 解析后的 HTTP request parts |
-| `Sources/DNSChainCore/LocalHTTPProxyServer.swift` | 本地 HTTP/HTTPS 代理；HTTP 转发和 HTTPS CONNECT 隧道 |
 | `Sources/DNSChainCore/ChainResolver.swift` | DNSChain、fallback、cache、query log |
 | `Sources/DNSChainCore/DNSMessage.swift` | 最小 DNS wire parser/response helper |
 | `Sources/DNSChainCore/Config.swift` | JSON 配置模型和默认配置 |
 | `Sources/DNSChainCore/ConfigStore.swift` | `~/.config/dns-chain/config.json` 读写和旧路径迁移 |
 | `Sources/DNSChainCore/CertificateManager.swift` | Root CA / localhost cert 生成、信任安装与卸载 |
 | `Sources/DNSChainCore/SystemDNS.swift` | `scutil --dns` 解析和 system resolver 选择 |
+| `Sources/DNSChainCore/SystemBypassStore.swift` | 记录 system DNS 已确认拦截的查询域名；文本文件一行一个 |
 
 ## Resolver 行为边界
 
@@ -81,7 +72,8 @@ dns-chain/
 - protected suffix 只走 system DNS。
 - upstream 返回可接受响应时立即返回，并记录所有已发生 attempts。
 - 命中 blocked IP / blocked CNAME 且配置开启 fallback 时继续后续 upstream。
-- `empty_answer` 或 `nxdomain` 如果配置要求 fallback，会继续尝试；如果所有上游都只给出合法 no-data 响应，最终返回最后一个 no-data 响应，不要合成 `SERVFAIL`。
+- system DNS 命中 blocked IP / blocked CNAME 时，把查询域名写入 `~/.config/dns-chain/system-bypass.txt`；下次 exact 或子域名命中时跳过 system DNS。
+- `empty_answer`、`nxdomain` 或 `invalid_response` 如果配置要求 fallback，会继续尝试；如果所有上游都只给出合法 no-data 响应，最终返回最后一个 no-data 响应，不要合成 `SERVFAIL`。
 - 只有所有 upstream 都超时、网络错误或无合法响应时，才合成 `SERVFAIL`。
 
 日志必须保留每个 attempt。不要只记录最终 upstream，否则无法排查连续 fallback。
@@ -119,9 +111,8 @@ dns-chain/
 
 - 状态栏使用 `NSStatusItem(withLength: 22)`，菜单栏图标当前是 `🐙`；DoH 服务停止时图标使用低透明度灰色状态。
 - 设置窗口由 `SettingsWindowPresenter` 创建 AppKit `NSWindow`，内容是 SwiftUI。
-- 设置窗口 tab 为 `DNS Chain`、`代理`、`日志`。`DNS Chain` 页左侧放本地 DoH、证书、回落、配置文件和应用信息，右侧放 DNSChain 上游列表。
+- 设置窗口 tab 为 `DNS Chain`、`日志`。`DNS Chain` 页左侧放本地 DoH、证书、回落、配置文件和应用信息，右侧放 DNSChain 上游列表。
 - 查询日志需要展示 qtype、result、final upstream、RCODE、attempts 和 answers。
-- 代理日志需要展示 method、target、status、bytes up/down。
 - 配置文件在 UI 中只读展示；编辑交给系统编辑器。
 
 ## 构建与测试

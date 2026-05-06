@@ -15,17 +15,20 @@ public actor ChainResolver {
     private var upstreams: [any DNSUpstream]
     private let cache: DNSCacheStore
     private let logs: QueryLogStore
+    private let systemBypass: SystemBypassStore
 
     public init(
         config: DNSChainConfig,
         cache: DNSCacheStore = DNSCacheStore(),
         logs: QueryLogStore? = nil,
+        systemBypass: SystemBypassStore = SystemBypassStore(),
         upstreams: [any DNSUpstream]? = nil
     ) {
         self.config = config
         self.upstreams = upstreams ?? UpstreamFactory.makeAll(config: config)
         self.cache = cache
         self.logs = logs ?? QueryLogStore(maxEntries: config.logging.maxEntries)
+        self.systemBypass = systemBypass
     }
 
     public func updateConfig(_ config: DNSChainConfig) {
@@ -63,8 +66,30 @@ public actor ChainResolver {
         }
 
         let protected = isProtected(parsedRequest.question.name)
-        let candidates = protected ? upstreams.filter { $0.type == .system } : upstreams
+        let bypassesSystem: Bool
+        if protected {
+            bypassesSystem = false
+        } else {
+            bypassesSystem = await systemBypass.contains(parsedRequest.question.name)
+        }
+        let candidates: [any DNSUpstream]
+        if protected {
+            candidates = upstreams.filter { $0.type == .system }
+        } else if bypassesSystem {
+            candidates = upstreams.filter { $0.type != .system }
+        } else {
+            candidates = upstreams
+        }
         var attempts: [AttemptLog] = []
+        if bypassesSystem {
+            attempts.append(AttemptLog(
+                upstreamID: "system",
+                upstreamName: "系统 DNS",
+                status: .skippedSystem,
+                latencyMs: 0,
+                detail: "system-bypass.txt"
+            ))
+        }
         var sawFallback = false
         var lastNoDataResponse: DNSMessage?
         var lastNoDataUpstreamID: String?
@@ -79,6 +104,9 @@ public actor ChainResolver {
                 attempts.append(attempt)
 
                 if classification.shouldFallback {
+                    if upstream.type == .system, classification.status == .blockedIP || classification.status == .blockedCNAME {
+                        await systemBypass.record(parsedRequest.question.name)
+                    }
                     sawFallback = true
                     if classification.status == .emptyAnswer || classification.status == .nxdomain {
                         lastNoDataResponse = response.message
@@ -170,7 +198,7 @@ public actor ChainResolver {
         case .nxDomain:
             return Classification(status: .nxdomain, shouldFallback: fallback.nxdomain, detail: nil)
         default:
-            return Classification(status: .invalidResponse, shouldFallback: true, detail: "rcode=\(response.rcode)")
+            return Classification(status: .invalidResponse, shouldFallback: fallback.invalidResponse, detail: "rcode=\(response.rcode)")
         }
     }
 

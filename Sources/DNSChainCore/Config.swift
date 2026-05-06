@@ -24,21 +24,6 @@ public struct ServerConfig: Codable, Equatable, Sendable {
     }
 }
 
-public struct ProxyConfig: Codable, Equatable, Sendable {
-    public var listenHost: String
-    public var listenPort: Int
-
-    public init(listenHost: String = "127.0.0.1", listenPort: Int = 8080) {
-        self.listenHost = listenHost
-        self.listenPort = listenPort
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case listenHost = "listen_host"
-        case listenPort = "listen_port"
-    }
-}
-
 public struct DNSUpstreamConfig: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var name: String
@@ -94,16 +79,18 @@ public struct FallbackConfig: Codable, Equatable, Sendable {
     public var blockedIP: Bool
     public var blockedCNAME: Bool
     public var nxdomain: Bool
+    public var invalidResponse: Bool
 
     public init(
         timeout: Bool = true,
         networkError: Bool = true,
         servfail: Bool = true,
         refused: Bool = true,
-        emptyAnswer: Bool = true,
+        emptyAnswer: Bool = false,
         blockedIP: Bool = true,
         blockedCNAME: Bool = true,
-        nxdomain: Bool = false
+        nxdomain: Bool = false,
+        invalidResponse: Bool = true
     ) {
         self.timeout = timeout
         self.networkError = networkError
@@ -113,6 +100,7 @@ public struct FallbackConfig: Codable, Equatable, Sendable {
         self.blockedIP = blockedIP
         self.blockedCNAME = blockedCNAME
         self.nxdomain = nxdomain
+        self.invalidResponse = invalidResponse
     }
 
     enum CodingKeys: String, CodingKey {
@@ -124,6 +112,20 @@ public struct FallbackConfig: Codable, Equatable, Sendable {
         case blockedIP = "blocked_ip"
         case blockedCNAME = "blocked_cname"
         case nxdomain
+        case invalidResponse = "invalid_response"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.timeout = try container.decodeIfPresent(Bool.self, forKey: .timeout) ?? true
+        self.networkError = try container.decodeIfPresent(Bool.self, forKey: .networkError) ?? true
+        self.servfail = try container.decodeIfPresent(Bool.self, forKey: .servfail) ?? true
+        self.refused = try container.decodeIfPresent(Bool.self, forKey: .refused) ?? true
+        self.emptyAnswer = try container.decodeIfPresent(Bool.self, forKey: .emptyAnswer) ?? false
+        self.blockedIP = try container.decodeIfPresent(Bool.self, forKey: .blockedIP) ?? true
+        self.blockedCNAME = try container.decodeIfPresent(Bool.self, forKey: .blockedCNAME) ?? true
+        self.nxdomain = try container.decodeIfPresent(Bool.self, forKey: .nxdomain) ?? false
+        self.invalidResponse = try container.decodeIfPresent(Bool.self, forKey: .invalidResponse) ?? true
     }
 }
 
@@ -180,60 +182,50 @@ public struct LoggingConfig: Codable, Equatable, Sendable {
 
 public struct DNSChainConfig: Codable, Equatable, Sendable {
     public var server: ServerConfig
-    public var proxy: ProxyConfig
     public var dnsChain: [DNSUpstreamConfig]
     public var fallbackWhen: FallbackConfig
     public var blockedAnswers: BlockedAnswersConfig
     public var protectedSuffixes: [String]
     public var cache: CacheConfig
     public var logging: LoggingConfig
-    public var launchAtLogin: Bool
 
     public init(
         server: ServerConfig = ServerConfig(),
-        proxy: ProxyConfig = ProxyConfig(),
         dnsChain: [DNSUpstreamConfig] = PresetLibrary.defaultChain,
         fallbackWhen: FallbackConfig = FallbackConfig(),
         blockedAnswers: BlockedAnswersConfig = BlockedAnswersConfig(),
         protectedSuffixes: [String] = [".local", ".lan", ".home.arpa", ".corp", ".internal"],
         cache: CacheConfig = CacheConfig(),
-        logging: LoggingConfig = LoggingConfig(),
-        launchAtLogin: Bool = false
+        logging: LoggingConfig = LoggingConfig()
     ) {
         self.server = server
-        self.proxy = proxy
         self.dnsChain = dnsChain
         self.fallbackWhen = fallbackWhen
         self.blockedAnswers = blockedAnswers
         self.protectedSuffixes = protectedSuffixes
         self.cache = cache
         self.logging = logging
-        self.launchAtLogin = launchAtLogin
     }
 
     enum CodingKeys: String, CodingKey {
         case server
-        case proxy
         case dnsChain = "dns_chain"
         case fallbackWhen = "fallback_when"
         case blockedAnswers = "blocked_answers"
         case protectedSuffixes = "protected_suffixes"
         case cache
         case logging
-        case launchAtLogin = "launch_at_login"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.server = try container.decodeIfPresent(ServerConfig.self, forKey: .server) ?? ServerConfig()
-        self.proxy = try container.decodeIfPresent(ProxyConfig.self, forKey: .proxy) ?? ProxyConfig()
         self.dnsChain = try container.decodeIfPresent([DNSUpstreamConfig].self, forKey: .dnsChain) ?? PresetLibrary.defaultChain
         self.fallbackWhen = try container.decodeIfPresent(FallbackConfig.self, forKey: .fallbackWhen) ?? FallbackConfig()
         self.blockedAnswers = try container.decodeIfPresent(BlockedAnswersConfig.self, forKey: .blockedAnswers) ?? BlockedAnswersConfig()
         self.protectedSuffixes = try container.decodeIfPresent([String].self, forKey: .protectedSuffixes) ?? [".local", ".lan", ".home.arpa", ".corp", ".internal"]
         self.cache = try container.decodeIfPresent(CacheConfig.self, forKey: .cache) ?? CacheConfig()
         self.logging = try container.decodeIfPresent(LoggingConfig.self, forKey: .logging) ?? LoggingConfig()
-        self.launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
     }
 }
 

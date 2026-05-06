@@ -11,6 +11,7 @@ public enum AttemptStatus: String, Codable, Sendable {
     case blockedIP = "blocked_ip"
     case blockedCNAME = "blocked_cname"
     case protected
+    case skippedSystem = "skipped_system"
     case invalidResponse = "invalid_response"
 }
 
